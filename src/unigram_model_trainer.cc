@@ -14,6 +14,11 @@
 
 #include "unigram_model_trainer.h"
 
+#include <fstream>
+#include <ctime>
+#include <iomanip>
+#include <sys/stat.h> // For mkdir
+
 #include <algorithm>
 #include <cfloat>
 #include <cmath>
@@ -603,19 +608,61 @@ util::Status Trainer::Train() {
 
   desired_vocab_size_ = static_cast<size_t>(trainer_spec_.vocab_size() * 1.1);
 
+  // Check if the log directory exists, if not, create it
+  const char* dir = "../log_data";
+  struct stat sb;
+  if (stat(dir, &sb) != 0 || !S_ISDIR(sb.st_mode)) {
+    if (mkdir(dir, 0777) == -1) { // Attempt to create the directory with appropriate permissions
+      std::cerr << "Error: Unable to create directory " << dir << std::endl;
+      std::exit(EXIT_FAILURE); // Exit if directory cannot be created
+    }
+  }
+
+  // Create a timestamped filename
+  std::time_t t = std::time(nullptr);
+  std::tm tm = *std::localtime(&t);
+  std::ostringstream oss;
+  oss << std::put_time(&tm, "%Y-%m-%d-%H-%M");
+  std::string filename = oss.str() + ".csv";
+  std::string filepath = std::string(dir) + "/" + filename;
+
+  // Open a file in the specified directory
+  std::ofstream file(filepath);
+  if (!file.is_open()) {
+    std::cerr << "Error: Failed to open file: " << filepath << std::endl;
+    std::exit(EXIT_FAILURE); // Exit if file cannot be opened
+  }
+
+  // Write headers
+  file << "Real_Iter,Sub_Iter,Objective,Pieces,Num_Tokens,Num_Tokens_Per_Piece\n";
+  int real_iter = 0;
+
   while (true) {
+    real_iter++;
     // Sub-EM iteration.
     for (int iter = 0; iter < trainer_spec_.num_sub_iterations(); ++iter) {
       // Executes E step
       float objective = 0.0;
       int64 num_tokens = 0;
+
+      // Executes E step. Get Expectation
       const auto expected = RunEStep(model, &objective, &num_tokens);
 
-      // Executes M step.
+      // Executes M step. Get New Sentence Pieces
       auto new_sentencepieces = RunMStep(model, expected);
+
+      // Updata sentencePieces
       model.SetSentencePieces(std::move(new_sentencepieces));
 
-      LOG(INFO) << "EM sub_iter=" << iter << " size=" << model.GetPieceSize()
+      // Print to file
+      file << real_iter << "," << iter << "," << objective << "," << model.GetPieceSize()
+                 << "," << num_tokens << "," << 1.0 * num_tokens / model.GetPieceSize() << "\n";
+      
+      
+
+      // Print to Screen
+      LOG(INFO) << "real_iter=" << real_iter
+                << " EM sub_iter=" << iter << " size=" << model.GetPieceSize()
                 << " obj=" << objective << " num_tokens=" << num_tokens
                 << " num_tokens/piece="
                 << 1.0 * num_tokens / model.GetPieceSize();
@@ -630,7 +677,15 @@ util::Status Trainer::Train() {
     // Prunes pieces.
     auto new_sentencepieces = PruneSentencePieces(model);
     model.SetSentencePieces(std::move(new_sentencepieces));
+
+   
   }  // end of EM iteration
+
+  // Close the file
+  file.close();
+
+  // Print the full path of the file
+  std::cout << "Log file created at: " << filepath << std::endl;
 
   // Finally, adjusts the size of sentencepices to be |vocab_size|.
   final_pieces_ = FinalizeSentencePieces(model);
